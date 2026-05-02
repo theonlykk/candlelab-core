@@ -2,6 +2,36 @@
 indicators.py — MA and RSI confirmation filters for backtest signals.
 All implementations are pure numpy, no scipy, no pandas built-in TA functions.
 """
+"""
+Three-Phase Hysteresis Framework
+=================================
+All momentum indicators in candlelab-core follow this state-transition model:
+
+Phase 1 — Setup (Exhaustion/Trend):
+    The market enters an exhausted or trending state.
+    RSI: crosses below oversold threshold (e.g. < 30)
+    MA Cross: fast MA crosses below slow MA
+
+Phase 2 — Confirmation:
+    Reversal patterns fire while the exhausted state holds.
+    The indicator remains in the exhausted state or is just beginning to turn.
+
+Phase 3 — Pivot:
+    Momentum direction changes — this is the entry signal.
+    RSI: RSI[i] > RSI[i-1] (momentum pivot) or RSI crosses back above threshold
+    MA Cross: fast MA crosses above slow MA within lookback window
+
+Design principles:
+- Direction change is the signal, not level crossing
+- Confluence on the signal bar is a feature, not a bug
+- Staleness is the real enemy — lookback windows guard against stale signals
+- Exit threshold != entry threshold (hysteresis)
+- If an indicator cannot be expressed in Setup/Confirmation/Pivot terms,
+  it does not belong in a reversal strategy filter
+
+New indicators must implement check_{name}() following this contract:
+    def check_{name}(df, sig_idx, dir_str, anchor_idx, has_continuation, **kwargs) -> bool
+"""
 import numpy as np
 import pandas as pd
 
