@@ -148,7 +148,7 @@ def run_ring_buffer(
     complement_arr: np.ndarray | None,
     connector: str | None,
     window: int = 10,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Core engine: int8 signal array aligned to anchor_arr.
 
@@ -167,14 +167,16 @@ def run_ring_buffer(
     """
     n = anchor_arr.shape[0]
     out = np.zeros(n, dtype=np.int8)
+    anchor_out = np.full(n, -1, dtype=np.int32)
     if complement_arr is None:
         i = 0
         while i < n:
             v = anchor_arr[i]
             if v != 0:
                 out[i] = v
+                anchor_out[i] = i
             i += 1
-        return out
+        return out, anchor_out
 
     w_first = anchor_arr.astype(np.int8, copy=True)
     w_second = complement_arr.astype(np.int8, copy=True)
@@ -184,6 +186,8 @@ def run_ring_buffer(
     buf = np.zeros(window, dtype=np.int8)
     last_t = np.full(window, -1, dtype=np.int32)
     pass1_sig = np.zeros(n, dtype=np.int8)
+    pass1_anc = np.full(n, -1, dtype=np.int32)
+    pass2_anc = np.full(n, -1, dtype=np.int32)
 
     m = 0
     while m < n:
@@ -204,6 +208,7 @@ def run_ring_buffer(
                     bv = buf[j]
                     if bv != 0 and bv == sv:
                         pass1_sig[m] = sv
+                        pass1_anc[m] = t
                         buf[j] = 0
                         last_t[j] = -1
                         w_first[t] = 0
@@ -238,6 +243,7 @@ def run_ring_buffer(
                         bv = buf2[j]
                         if bv != 0 and bv == fv:
                             pass2_sig[m] = fv
+                            pass2_anc[m] = t
                             buf2[j] = 0
                             last_t2[j] = -1
                             w_second[t] = 0
@@ -252,13 +258,15 @@ def run_ring_buffer(
         a = pass1_sig[i]
         if a != 0:
             out[i] = a
+            anchor_out[i] = pass1_anc[i]
         else:
             b = pass2_sig[i]
             if b != 0:
                 out[i] = b
+                anchor_out[i] = pass2_anc[i]
         i += 1
 
-    return out
+    return out, anchor_out
 
 
 def run_ring_buffer_type4(
@@ -267,7 +275,7 @@ def run_ring_buffer_type4(
     continuation_arr: np.ndarray,
     window_pair: int = WINDOW_REVERSAL_PAIR,
     window_tail: int = WINDOW_CONTINUATION_TAIL,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Type 4 signal: two reversals (any-order) within window_pair candles,
     then continuation within window_tail candles AFTER the pair completes.
@@ -285,9 +293,10 @@ def run_ring_buffer_type4(
     """
     n = pattern1_arr.shape[0]
     out = np.zeros(n, dtype=np.int8)
+    anchor_out = np.full(n, -1, dtype=np.int32)
 
     # Stage 1: any-order reversal pair completions
-    pair_completions = run_ring_buffer(
+    pair_completions, pair_anchors = run_ring_buffer(
         pattern1_arr,
         pattern2_arr,
         connector="any-order",
@@ -297,6 +306,7 @@ def run_ring_buffer_type4(
     # Stage 2: continuation tail scan
     pending_end = -1
     pending_dir = 0
+    pending_anchor = -1
 
     i = 0
     while i < n:
@@ -306,6 +316,7 @@ def run_ring_buffer_type4(
             # Most recent completion takes precedence
             pending_end = i + window_tail
             pending_dir = pv  # np.int8, no int() cast
+            pending_anchor = int(pair_anchors[i])
 
         # Continuation must fire strictly after the completion bar (pv == 0)
         # and within the active tail window
@@ -313,13 +324,15 @@ def run_ring_buffer_type4(
             cv = continuation_arr[i]
             if cv != 0 and cv == pending_dir:  # sign must match, no int() cast
                 out[i] = pending_dir
+                anchor_out[i] = pending_anchor
                 # Reset — prevent same completion firing twice
                 pending_end = -1
                 pending_dir = 0
+                pending_anchor = -1
 
         i += 1
 
-    return out
+    return out, anchor_out
 
 
 def detect_signal(
@@ -330,7 +343,8 @@ def detect_signal(
     direction: str,
     window: int = 10,
     continuation: str | None = None,
-) -> np.ndarray:
+    return_anchors: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
     Public entry: build arrays, run ring buffer, apply direction filter.
     Returns int8 array aligned to signals_df rows.
@@ -338,10 +352,15 @@ def detect_signal(
     continuation: if provided alongside complement, activates Type 4 detection
     (run_ring_buffer_type4). window maps to window_pair; tail window uses
     WINDOW_CONTINUATION_TAIL constant.
+
+    return_anchors: if True, returns (signal_array, anchor_array) tuple.
+    anchor_array[i] contains the chronological first bar index of the
+    reversal setup that produced signal_array[i]. -1 where no signal.
+    Default False preserves legacy single-array return.
     """
     anchor_arr, complement_arr = build_signal_arrays(signals_df, anchor, complement)
     if complement_arr is None:
-        raw = run_ring_buffer(anchor_arr, None, connector, window)
+        raw, anc = run_ring_buffer(anchor_arr, None, connector, window)
     else:
         first_pat, _second_pat = get_pass_order(anchor, complement)
         if first_pat == anchor:
@@ -350,12 +369,12 @@ def detect_signal(
         else:
             first_arr = complement_arr
             second_arr = anchor_arr
-        raw = run_ring_buffer(first_arr, second_arr, connector, window)
+        raw, anc = run_ring_buffer(first_arr, second_arr, connector, window)
 
         # Type 4: if continuation pattern provided, run two-stage detection
         if continuation is not None and continuation in signals_df.columns:
             cont_arr = signals_df[continuation].to_numpy(dtype=np.int8, copy=True)
-            raw = run_ring_buffer_type4(
+            raw, anc = run_ring_buffer_type4(
                 first_arr,
                 second_arr,
                 cont_arr,
@@ -377,4 +396,6 @@ def detect_signal(
                 raw[i] = 0
             i += 1
 
+    if return_anchors:
+        return raw, anc
     return raw
