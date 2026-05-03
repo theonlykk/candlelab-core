@@ -2,16 +2,30 @@ import json
 import logging
 import pandas as pd
 
+from .signal_engine import WINDOW_REVERSAL_PAIR
+from .indicators import (
+    check_ma_alignment,
+    check_ma_cross_direction,
+    check_ma_stable,
+    check_rsi_envelope,
+    check_rsi_extreme,
+)
+
 log = logging.getLogger(__name__)
 
-from .indicators import check_ma_cross_direction, check_rsi_extreme, check_ma_stable
 
-
-def _parse_indicator_filter_config(raw) -> dict | None:
+def _parse_indicator_filter_config(raw) -> dict | list | None:
     """
     Normalize candlelab_strategies_live.indicator_filter to a dict.
     Plain strings 'rsi' / 'ma_cross' use defaults; JSON objects use stored thresholds.
     """
+    if isinstance(raw, list):
+        result = []
+        for item in raw:
+            parsed = _parse_indicator_filter_config(item)
+            if parsed is not None:
+                result.append(parsed)
+        return result if result else None
     if raw is None or raw == "":
         return None
     if isinstance(raw, dict):
@@ -42,31 +56,101 @@ def _parse_indicator_filter_config(raw) -> dict | None:
     elif t == "ma_cross":
         dr = d.get("direction")
         out["direction"] = str(dr).strip().lower() if dr is not None else None
+        out["fast_period"] = int(d.get("fast_period", 5))
+        out["slow_period"] = int(d.get("slow_period", 20))
+        out["lookback"] = int(d.get("lookback", 3))
+    elif t == "rsi_envelope":
+        out["exhaustion_threshold"] = float(d.get("exhaustion_threshold", 30.0))
+        out["recovery_threshold"] = float(d.get("recovery_threshold", 30.0))
+        out["exhaustion_lookback"] = int(d.get("exhaustion_lookback", 5))
+        out["recovery_window"] = int(d.get("recovery_window", 5))
+    elif t == "ma_alignment":
+        out["fast"] = int(d.get("fast", 5))
+        out["slow"] = int(d.get("slow", 20))
     return out
 
 
 def passes_indicator(
-    ind_cfg: dict | None, df: pd.DataFrame, sig_idx: int, dir_str: str
+    ind_cfg: dict | list | None,
+    df: pd.DataFrame,
+    sig_idx: int,
+    dir_str: str,
+    anchor_idx: int = -1,
+    has_continuation: bool = False,
 ) -> bool:
     if not ind_cfg:
         return True
-    it = str(ind_cfg.get("type", "")).lower()
-    if it == "ma_cross":
-        cross_dir = ind_cfg.get("direction")
-        if cross_dir is None:
-            cross_dir = "bullish" if dir_str.lower() in ("long", "buy") else "bearish"
+
+    # Normalise to list — dict→list wrapping only here, never in parser
+    if isinstance(ind_cfg, dict):
+        filters = [ind_cfg]
+    elif isinstance(ind_cfg, list):
+        filters = ind_cfg
+    else:
+        return True
+
+    # AND logic — all filters must pass
+    for f in filters:
+        it = str(f.get("type", "")).lower()
+
+        if it == "rsi_envelope":
+            if not check_rsi_envelope(
+                df,
+                sig_idx,
+                dir_str,
+                anchor_idx,
+                has_continuation,
+                exhaustion_threshold=float(f.get("exhaustion_threshold", 30.0)),
+                recovery_threshold=float(f.get("recovery_threshold", 30.0)),
+                exhaustion_lookback=int(f.get("exhaustion_lookback", 5)),
+                recovery_window=int(f.get("recovery_window", 5)),
+                window_reversal_pair=WINDOW_REVERSAL_PAIR,
+            ):
+                return False
+
+        elif it == "ma_alignment":
+            if not check_ma_alignment(
+                df,
+                sig_idx,
+                dir_str,
+                fast_period=int(f.get("fast", 5)),
+                slow_period=int(f.get("slow", 20)),
+            ):
+                return False
+
+        elif it == "ma_cross":
+            cross_dir = f.get("direction")
+            if cross_dir is None:
+                cross_dir = "bullish" if dir_str.lower() in ("long", "buy") else "bearish"
+            else:
+                cross_dir = str(cross_dir).strip().lower()
+            if not check_ma_cross_direction(
+                df,
+                sig_idx,
+                cross_dir,
+                anchor_idx=anchor_idx,
+                has_continuation=has_continuation,
+                fast_period=int(f.get("fast_period", 5)),
+                slow_period=int(f.get("slow_period", 20)),
+                lookback=int(f.get("lookback", 3)),
+            ):
+                return False
+
+        elif it == "rsi":
+            if not check_rsi_extreme(
+                df,
+                sig_idx,
+                dir_str,
+                float(f.get("oversold", 30)),
+                float(f.get("overbought", 70)),
+            ):
+                return False
+
+        elif it == "ma_stable":
+            if not check_ma_stable(df, sig_idx, dir_str):
+                return False
+
         else:
-            cross_dir = str(cross_dir).strip().lower()
-        return check_ma_cross_direction(df, sig_idx, cross_dir)
-    if it == "rsi":
-        return check_rsi_extreme(
-            df,
-            sig_idx,
-            dir_str,
-            float(ind_cfg.get("oversold", 30)),
-            float(ind_cfg.get("overbought", 70)),
-        )
-    if it == "ma_stable":
-        return check_ma_stable(df, sig_idx, dir_str)
-    log.debug("Unknown indicator_filter %r — treating as pass", ind_cfg)
+            log.debug("Unknown indicator_filter type %r — treating as pass", f)
+
     return True
