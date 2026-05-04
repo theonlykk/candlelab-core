@@ -127,7 +127,7 @@ if __name__ == "__main__":
     _git_push(CANDLELAB_DIR, tag)
     _update_requirements(OANDA_REQ, tag)
     _git_push(OANDA_DIR, tag)
-    print(f"\n✓ candlelab-core {tag} deployed to both repos.")
+    print(f"\n[OK] candlelab-core {tag} deployed to both repos.")
     print(f"  candlelab:     pinned to {tag}")
     print(f"  oanda-trading: pinned to {tag}")
     print("  Railway builds triggered. Watch both dashboards.")
