@@ -87,7 +87,7 @@ def check_ma_cross_direction(
     has_continuation: bool = False,
     fast_period: int = 5,
     slow_period: int = 20,
-    lookback: int = 3,
+    lookback: int = 5,
 ) -> bool:
     """
     Three-Phase Hysteresis MA cross: setup (opposite alignment), then pivot

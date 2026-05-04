@@ -58,7 +58,7 @@ def _parse_indicator_filter_config(raw) -> dict | list | None:
         out["direction"] = str(dr).strip().lower() if dr is not None else None
         out["fast_period"] = int(d.get("fast_period", 5))
         out["slow_period"] = int(d.get("slow_period", 20))
-        out["lookback"] = int(d.get("lookback", 3))
+        out["lookback"] = int(d.get("lookback", 5))
     elif t == "rsi_envelope":
         out["exhaustion_threshold"] = float(d.get("exhaustion_threshold", 30.0))
         out["recovery_threshold"] = float(d.get("recovery_threshold", 30.0))
@@ -132,7 +132,7 @@ def passes_indicator(
                 has_continuation=has_continuation,
                 fast_period=int(f.get("fast_period", 5)),
                 slow_period=int(f.get("slow_period", 20)),
-                lookback=int(f.get("lookback", 3)),
+                lookback=int(f.get("lookback", 5)),
             ):
                 return False
 
