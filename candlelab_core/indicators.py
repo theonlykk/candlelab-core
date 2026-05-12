@@ -79,7 +79,7 @@ def _rsi(arr: np.ndarray, period: int = 14) -> np.ndarray:
     return result
 
 
-def check_ma_cross_direction(
+def _check_ma_cross_direction_detailed(
     df: pd.DataFrame,
     signal_idx: int,
     required: str,
@@ -88,7 +88,7 @@ def check_ma_cross_direction(
     fast_period: int = 5,
     slow_period: int = 20,
     lookback: int = 5,
-) -> bool:
+) -> tuple[bool, int | None]:
     """
     Three-Phase Hysteresis MA cross: setup (opposite alignment), then pivot
     (crossover) within the scan window ending on the signal bar (inclusive).
@@ -107,7 +107,7 @@ def check_ma_cross_direction(
     s_slow = sma_slow[start:end]
     valid = ~(np.isnan(s_fast) | np.isnan(s_slow))
     if np.sum(valid) < 2:
-        return False
+        return False, None
     s_fast_v = s_fast[valid]
     s_slow_v = s_slow[valid]
 
@@ -117,26 +117,87 @@ def check_ma_cross_direction(
     else:
         setup_ok = bool(np.any(s_fast_v > s_slow_v))
     if not setup_ok:
-        return False
+        return False, None
 
     if req == "bullish":
-        cross = bool(
-            np.any(
-                (s_fast_v[:-1] < s_slow_v[:-1]) & (s_fast_v[1:] >= s_slow_v[1:])
-            )
-        )
+        cross_mask = (s_fast_v[:-1] < s_slow_v[:-1]) & (s_fast_v[1:] >= s_slow_v[1:])
     else:
-        cross = bool(
-            np.any(
-                (s_fast_v[:-1] > s_slow_v[:-1]) & (s_fast_v[1:] <= s_slow_v[1:])
-            )
-        )
-    return cross
+        cross_mask = (s_fast_v[:-1] > s_slow_v[:-1]) & (s_fast_v[1:] <= s_slow_v[1:])
+    compressed_where = np.where(cross_mask)[0]
+    if compressed_where.size == 0:
+        return False, None
+    compressed_idx = int(compressed_where[0])
+    valid_positions = np.where(valid)[0]
+    if compressed_idx + 1 >= len(valid_positions):
+        return False, None
+    slice_idx = int(valid_positions[compressed_idx + 1])
+    absolute_idx = start + slice_idx
+    return True, absolute_idx
+
+
+def check_ma_cross_direction(
+    df: pd.DataFrame,
+    signal_idx: int,
+    required: str,
+    anchor_idx: int = -1,
+    has_continuation: bool = False,
+    fast_period: int = 5,
+    slow_period: int = 20,
+    lookback: int = 5,
+) -> bool:
+    """
+    Three-Phase Hysteresis MA cross: setup (opposite alignment), then pivot
+    (crossover) within the scan window ending on the signal bar (inclusive).
+    """
+    return _check_ma_cross_direction_detailed(
+        df,
+        signal_idx,
+        required,
+        anchor_idx=anchor_idx,
+        has_continuation=has_continuation,
+        fast_period=fast_period,
+        slow_period=slow_period,
+        lookback=lookback,
+    )[0]
 
 
 def check_ma_cross(df: pd.DataFrame, signal_idx: int) -> bool:
     """Backward-compatible: bullish cross only."""
     return check_ma_cross_direction(df, signal_idx, "bullish")
+
+
+def _check_rsi_extreme_detailed(
+    df: pd.DataFrame,
+    signal_idx: int,
+    direction: str,
+    oversold: float = 30.0,
+    overbought: float = 70.0,
+    lookback: int = 10,
+) -> tuple[bool, int | None]:
+    """
+    Returns True if RSI(14) was below oversold (long) or above overbought (short)
+    at any point in the lookback candles before signal_idx.
+    """
+    close = df["close"].to_numpy(dtype=float)
+    end = signal_idx
+    start = max(0, end - lookback)
+
+    rsi = _rsi(close[:end])
+    w = rsi[start:end]
+    window = w[~np.isnan(w)]
+
+    if len(window) == 0:
+        return False, None
+
+    if direction == "long":
+        if not bool(np.any(window < float(oversold))):
+            return False, None
+        rel = int(np.nanargmin(w))
+        return True, start + rel
+    if not bool(np.any(window > float(overbought))):
+        return False, None
+    rel = int(np.nanargmax(w))
+    return True, start + rel
 
 
 def check_rsi_extreme(
@@ -151,20 +212,9 @@ def check_rsi_extreme(
     Returns True if RSI(14) was below oversold (long) or above overbought (short)
     at any point in the lookback candles before signal_idx.
     """
-    close = df["close"].to_numpy(dtype=float)
-    end = signal_idx
-    start = max(0, end - lookback)
-
-    rsi = _rsi(close[:end])
-    window = rsi[start:end]
-    window = window[~np.isnan(window)]
-
-    if len(window) == 0:
-        return False
-
-    if direction == "long":
-        return bool(np.any(window < float(oversold)))
-    return bool(np.any(window > float(overbought)))
+    return _check_rsi_extreme_detailed(
+        df, signal_idx, direction, oversold, overbought, lookback
+    )[0]
 
 
 def _ma_stable_progressive_closes(close: np.ndarray, end: int, direction: str) -> bool:
@@ -223,6 +273,37 @@ def check_ma_stable(
     return _ma_stable_progressive_closes(close, end, direction)
 
 
+def _check_ma_alignment_detailed(
+    df: pd.DataFrame,
+    sig_idx: int,
+    dir_str: str,
+    fast_period: int = 5,
+    slow_period: int = 20,
+) -> tuple[bool, int | None]:
+    """
+    Point-in-time MA alignment check for continuation strategies.
+    Phase 3 (Pivot) only — no lookback window.
+    Long: fast_ma > slow_ma at sig_idx - 1.
+    Short: fast_ma < slow_ma at sig_idx - 1.
+    """
+    if sig_idx < 1:
+        return False, None
+    close = df["close"].to_numpy(dtype=float)
+    fast = _sma(close[:sig_idx], fast_period)
+    slow = _sma(close[:sig_idx], slow_period)
+    f_val = fast[-1]
+    s_val = slow[-1]
+    if np.isnan(f_val) or np.isnan(s_val):
+        return False, None
+    if dir_str == "long":
+        ok = bool(f_val > s_val)
+    else:
+        ok = bool(f_val < s_val)
+    if not ok:
+        return False, None
+    return True, sig_idx - 1
+
+
 def check_ma_alignment(
     df: pd.DataFrame,
     sig_idx: int,
@@ -236,18 +317,92 @@ def check_ma_alignment(
     Long: fast_ma > slow_ma at sig_idx - 1.
     Short: fast_ma < slow_ma at sig_idx - 1.
     """
-    if sig_idx < 1:
-        return False
+    return _check_ma_alignment_detailed(
+        df, sig_idx, dir_str, fast_period, slow_period
+    )[0]
+
+
+def _check_rsi_envelope_detailed(
+    df: pd.DataFrame,
+    sig_idx: int,
+    dir_str: str,
+    anchor_idx: int,
+    has_continuation: bool,
+    exhaustion_threshold: float = 30.0,
+    recovery_threshold: float = 30.0,
+    exhaustion_lookback: int = 5,
+    recovery_window: int = 5,
+    window_reversal_pair: int = 10,
+) -> tuple[bool, int | None, int | None]:
+    """
+    Three-Phase Hysteresis RSI filter.
+
+    Phase 1 (Exhaustion): RSI must touch below exhaustion_threshold (long)
+        or above 100-exhaustion_threshold (short) within
+        [anchor_idx - exhaustion_lookback, proxy_reversal_end].
+
+    Phase 3 (Recovery):
+        has_continuation=False: RSI[sig_idx] > RSI[sig_idx-1] (momentum pivot)
+        has_continuation=True: RSI crosses back through recovery_threshold
+            in [proxy_reversal_end + 1, sig_idx]
+
+    If anchor_idx < 0: log warning and return False — should not occur in
+    normal operation after Phase 1b-i anchor tracking is wired in.
+
+    window_reversal_pair: passed in to avoid circular import with signal_engine.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+
+    if anchor_idx < 0:
+        log.warning(
+            "check_rsi_envelope called with anchor_idx=%d — returning False",
+            anchor_idx,
+        )
+        return False, None, None
+
     close = df["close"].to_numpy(dtype=float)
-    fast = _sma(close[:sig_idx], fast_period)
-    slow = _sma(close[:sig_idx], slow_period)
-    f_val = fast[-1]
-    s_val = slow[-1]
-    if np.isnan(f_val) or np.isnan(s_val):
-        return False
+    rsi = _rsi(close[: sig_idx + 1])
+
+    proxy_reversal_end = min(anchor_idx + window_reversal_pair, sig_idx - 1)
+    exhaust_start = max(0, anchor_idx - exhaustion_lookback)
+    ex_slice = rsi[exhaust_start : proxy_reversal_end + 1]
+    finite_ex = ~np.isnan(ex_slice)
     if dir_str == "long":
-        return bool(f_val > s_val)
-    return bool(f_val < s_val)
+        exhaust_hit = finite_ex & (ex_slice < float(exhaustion_threshold))
+    else:
+        exhaust_hit = finite_ex & (ex_slice > (100.0 - float(exhaustion_threshold)))
+    exhaust_where = np.where(exhaust_hit)[0]
+    if exhaust_where.size == 0:
+        return False, None, None
+    exhaustion_idx = exhaust_start + int(exhaust_where[0])
+
+    if not has_continuation:
+        if sig_idx < 1:
+            return False, exhaustion_idx, None
+        if dir_str == "long":
+            ok = bool(rsi[sig_idx] > rsi[sig_idx - 1])
+        else:
+            ok = bool(rsi[sig_idx] < rsi[sig_idx - 1])
+        if ok:
+            return True, exhaustion_idx, sig_idx
+        return False, exhaustion_idx, None
+    recovery_start = proxy_reversal_end + 1
+    recovery_end = sig_idx + 1
+    if recovery_start >= recovery_end:
+        return False, exhaustion_idx, None
+    rec_slice = rsi[recovery_start:recovery_end]
+    finite_r = ~np.isnan(rec_slice)
+    if dir_str == "long":
+        rec_hit = finite_r & (rec_slice > float(recovery_threshold))
+    else:
+        rec_hit = finite_r & (rec_slice < (100.0 - float(recovery_threshold)))
+    rec_where = np.where(rec_hit)[0]
+    if rec_where.size == 0:
+        return False, exhaustion_idx, None
+    pivot_idx = recovery_start + int(rec_where[0])
+    return True, exhaustion_idx, pivot_idx
 
 
 def check_rsi_envelope(
@@ -279,52 +434,15 @@ def check_rsi_envelope(
 
     window_reversal_pair: passed in to avoid circular import with signal_engine.
     """
-    import logging
-
-    log = logging.getLogger(__name__)
-
-    if anchor_idx < 0:
-        log.warning(
-            "check_rsi_envelope called with anchor_idx=%d — returning False",
-            anchor_idx,
-        )
-        return False
-
-    close = df["close"].to_numpy(dtype=float)
-    rsi = _rsi(close[: sig_idx + 1])
-
-    proxy_reversal_end = min(anchor_idx + window_reversal_pair, sig_idx - 1)
-    exhaust_start = max(0, anchor_idx - exhaustion_lookback)
-    exhaust_window = rsi[exhaust_start : proxy_reversal_end + 1]
-    exhaust_window = exhaust_window[~np.isnan(exhaust_window)]
-
-    if len(exhaust_window) == 0:
-        return False
-
-    if dir_str == "long":
-        exhausted = bool(np.any(exhaust_window < float(exhaustion_threshold)))
-    else:
-        exhausted = bool(np.any(exhaust_window > (100.0 - float(exhaustion_threshold))))
-
-    if not exhausted:
-        return False
-
-    if not has_continuation:
-        if sig_idx < 1:
-            return False
-        if dir_str == "long":
-            return bool(rsi[sig_idx] > rsi[sig_idx - 1])
-        return bool(rsi[sig_idx] < rsi[sig_idx - 1])
-    else:
-        recovery_start = proxy_reversal_end + 1
-        recovery_end = sig_idx + 1
-        if recovery_start >= recovery_end:
-            return False
-        rec_window = rsi[recovery_start:recovery_end]
-        rec_window = rec_window[~np.isnan(rec_window)]
-        if len(rec_window) == 0:
-            return False
-        if dir_str == "long":
-            return bool(np.any(rec_window > float(recovery_threshold)))
-        else:
-            return bool(np.any(rec_window < (100.0 - float(recovery_threshold))))
+    return _check_rsi_envelope_detailed(
+        df,
+        sig_idx,
+        dir_str,
+        anchor_idx,
+        has_continuation,
+        exhaustion_threshold=exhaustion_threshold,
+        recovery_threshold=recovery_threshold,
+        exhaustion_lookback=exhaustion_lookback,
+        recovery_window=recovery_window,
+        window_reversal_pair=window_reversal_pair,
+    )[0]
