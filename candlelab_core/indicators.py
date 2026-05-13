@@ -173,7 +173,7 @@ def _check_rsi_extreme_detailed(
     oversold: float = 30.0,
     overbought: float = 70.0,
     lookback: int = 10,
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, float | None]:
     """
     Returns True if RSI(14) was below oversold (long) or above overbought (short)
     at any point in the lookback candles before signal_idx.
@@ -187,17 +187,21 @@ def _check_rsi_extreme_detailed(
     window = w[~np.isnan(w)]
 
     if len(window) == 0:
-        return False, None
+        return False, None, None
 
     if direction == "long":
         if not bool(np.any(window < float(oversold))):
-            return False, None
+            return False, None, None
         rel = int(np.nanargmin(w))
-        return True, start + rel
+        rv = w[rel]
+        ext_f = None if np.isnan(rv) else float(rv)
+        return True, start + rel, ext_f
     if not bool(np.any(window > float(overbought))):
-        return False, None
+        return False, None, None
     rel = int(np.nanargmax(w))
-    return True, start + rel
+    rv = w[rel]
+    ext_f = None if np.isnan(rv) else float(rv)
+    return True, start + rel, ext_f
 
 
 def check_rsi_extreme(

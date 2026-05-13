@@ -1,5 +1,7 @@
 import json
 import logging
+
+import numpy as np
 import pandas as pd
 
 from .signal_engine import WINDOW_REVERSAL_PAIR
@@ -178,6 +180,8 @@ def passes_indicator_detailed(
         "rsi_exhaustion_ts": None,
         "rsi_pivot_ts": None,
         "rsi_extreme_ts": None,
+        "rsi_extreme_val": None,
+        "rsi_momentum_dir": None,
         "ma_cross_ts": None,
         "ma_alignment_ts": None,
     }
@@ -245,7 +249,7 @@ def passes_indicator_detailed(
                 return False, meta
 
         elif it == "rsi":
-            ok, ext_i = _check_rsi_extreme_detailed(
+            ok, ext_i, ext_val = _check_rsi_extreme_detailed(
                 df,
                 sig_idx,
                 dir_str,
@@ -253,6 +257,8 @@ def passes_indicator_detailed(
                 float(f.get("overbought", 70)),
             )
             meta["rsi_extreme_ts"] = _index_to_timestamp(df, ext_i)
+            if ext_val is not None and not np.isnan(ext_val):
+                meta["rsi_extreme_val"] = round(float(ext_val), 1)
             if not ok:
                 return False, meta
 
@@ -262,5 +268,13 @@ def passes_indicator_detailed(
 
         else:
             log.debug("Unknown indicator_filter type %r — treating as pass", f)
+
+    if meta.get("rsi_extreme_ts") is not None or meta.get("rsi_exhaustion_ts") is not None:
+        if "close" in df.columns and sig_idx >= 1:
+            from candlelab_core.indicators import _rsi as _rsi_fn
+            _close = df["close"].to_numpy(dtype=float)
+            _rsi_arr = _rsi_fn(_close[: sig_idx + 1])
+            if len(_rsi_arr) >= 2 and not np.isnan(_rsi_arr[-1]) and not np.isnan(_rsi_arr[-2]):
+                meta["rsi_momentum_dir"] = "UP" if _rsi_arr[-1] > _rsi_arr[-2] else "DOWN"
 
     return True, meta
