@@ -319,6 +319,113 @@ def upside_downside_tasuki_gap(df: pd.DataFrame) -> pd.Series:
     return sig
 
 
+# ── 13. Inside Bar Breakout (continuation) ───────────────────────────────────
+def detect_inside_bar_breakout(df: pd.DataFrame) -> pd.Series:
+    """
+    Inside Bar Breakout continuation pattern.
+
+    Bar[i-2]: Impulse — directional candle with body >= 50% of range.
+    Bar[i-1]: Inside Bar — high and low strictly contained within
+              Bar[i-2]'s range (strict inequality only).
+    Bar[i]:   Breakout — close strictly beyond Bar[i-2]'s extreme.
+
+    Returns +1 (bullish), -1 (bearish), 0 (none).
+    First 2 bars always return 0 (insufficient lookback).
+    """
+    body = (df["close"] - df["open"]).abs()
+    rng = df["high"] - df["low"]
+    body_ratio = np.where(rng == 0, 0.0, body / rng)
+    body_ratio = pd.Series(body_ratio, index=df.index)
+    is_bull = df["close"] > df["open"]
+    is_bear = df["close"] < df["open"]
+
+    cond1_bull = is_bull.shift(2) & (body_ratio.shift(2) >= 0.50)
+    cond2_bull = (df["high"].shift(1) < df["high"].shift(2)) & (
+        df["low"].shift(1) > df["low"].shift(2)
+    )
+    cond3_bull = df["close"] > df["high"].shift(2)
+    bull_mask = cond1_bull & cond2_bull & cond3_bull
+
+    cond1_bear = is_bear.shift(2) & (body_ratio.shift(2) >= 0.50)
+    cond2_bear = (df["high"].shift(1) < df["high"].shift(2)) & (
+        df["low"].shift(1) > df["low"].shift(2)
+    )
+    cond3_bear = df["close"] < df["low"].shift(2)
+    bear_mask = cond1_bear & cond2_bear & cond3_bear
+
+    result = np.zeros(len(df), dtype=int)
+    result[bull_mask.fillna(False).to_numpy()] = 1
+    result[bear_mask.fillna(False).to_numpy()] = -1
+    return pd.Series(result, index=df.index)
+
+
+# ── 14. 1-Candle Flag (continuation) ─────────────────────────────────────────
+def detect_1_candle_flag(df: pd.DataFrame) -> pd.Series:
+    """
+    1-Candle Flag (Pullback) continuation pattern.
+
+    Bar[i-2]: Impulse — directional, body >= 50% of range,
+              close breaks prior 3-bar structure (bars i-5 to i-3).
+    Bar[i-1]: Flag — opposite body colour (no dojis), strictly
+              contained within Bar[i-2]'s range.
+    Bar[i]:   Resumption — same direction, body engulfs flag body,
+              close beyond Bar[i-2]'s extreme.
+
+    Returns +1 (bullish), -1 (bearish), 0 (none).
+    First 5 bars always return 0 (insufficient lookback).
+    """
+    body = (df["close"] - df["open"]).abs()
+    rng = df["high"] - df["low"]
+    body_ratio = np.where(rng == 0, 0.0, body / rng)
+    body_ratio = pd.Series(body_ratio, index=df.index)
+    is_bull = df["close"] > df["open"]
+    is_bear = df["close"] < df["open"]
+
+    prior_high = df["high"].shift(3).rolling(3).max()
+    prior_low = df["low"].shift(3).rolling(3).min()
+
+    imp_bull = (
+        is_bull.shift(2)
+        & (body_ratio.shift(2) >= 0.50)
+        & (df["close"].shift(2) > prior_high)
+    )
+    flag_bull = (
+        is_bear.shift(1)
+        & (df["high"].shift(1) < df["high"].shift(2))
+        & (df["low"].shift(1) > df["low"].shift(2))
+    )
+    res_bull = (
+        is_bull
+        & (df["close"] > df["open"].shift(1))
+        & (df["open"] <= df["close"].shift(1))
+        & (df["close"] > df["high"].shift(2))
+    )
+    bull_mask = imp_bull & flag_bull & res_bull
+
+    imp_bear = (
+        is_bear.shift(2)
+        & (body_ratio.shift(2) >= 0.50)
+        & (df["close"].shift(2) < prior_low)
+    )
+    flag_bear = (
+        is_bull.shift(1)
+        & (df["high"].shift(1) < df["high"].shift(2))
+        & (df["low"].shift(1) > df["low"].shift(2))
+    )
+    res_bear = (
+        is_bear
+        & (df["close"] < df["open"].shift(1))
+        & (df["open"] >= df["close"].shift(1))
+        & (df["close"] < df["low"].shift(2))
+    )
+    bear_mask = imp_bear & flag_bear & res_bear
+
+    result = np.zeros(len(df), dtype=int)
+    result[bull_mask.fillna(False).to_numpy()] = 1
+    result[bear_mask.fillna(False).to_numpy()] = -1
+    return pd.Series(result, index=df.index)
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 PATTERNS = {
     "Hammer/Hanging Man": hammer_hanging_man,
@@ -326,6 +433,8 @@ PATTERNS = {
     "Engulfing": engulfing,
     "Morning/Evening Star": morning_evening_star,
     "Three Soldiers/Crows": three_soldiers_crows,
+    "Inside Bar Breakout": detect_inside_bar_breakout,
+    "1-Candle Flag": detect_1_candle_flag,
 }
 
 # Display labels for server-side chart annotations (`chart_renderer`).
