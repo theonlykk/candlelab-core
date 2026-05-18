@@ -335,6 +335,59 @@ def run_ring_buffer_type4(
     return out, anchor_out
 
 
+def run_ring_buffer_type1c(
+    anchor_arr: np.ndarray,
+    continuation_arr: np.ndarray,
+    window_tail: int = WINDOW_ORDERED,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Type 1C signal: single reversal anchor, then continuation within
+    window_tail candles AFTER the anchor bar.
+
+    Stage 1: anchor fires (non-zero bar).
+    Stage 2: forward scan — continuation must appear strictly after the
+             anchor bar, within window_tail candles.
+             Continuation sign must match anchor direction exactly.
+             Most recent anchor takes precedence (overwrites window).
+             Once continuation fires, window resets — no double-firing.
+
+    Cython-friendly: no int() casts inside loop, no list comprehensions,
+    no dicts, explicit while loops only. np.int8 values compared directly.
+    """
+    n = anchor_arr.shape[0]
+    out = np.zeros(n, dtype=np.int8)
+    anchor_out = np.full(n, -1, dtype=np.int32)
+
+    pending_end = -1
+    pending_dir = 0
+    pending_anchor = -1
+
+    i = 0
+    while i < n:
+        av = anchor_arr[i]
+        if av != 0:
+            # New anchor — reset tail window
+            pending_end = i + window_tail
+            pending_dir = av
+            pending_anchor = i
+
+        # Continuation must fire strictly after the anchor bar (av == 0)
+        # and within the active tail window
+        if pending_end >= i and pending_dir != 0 and av == 0:
+            cv = continuation_arr[i]
+            if cv != 0 and cv == pending_dir:
+                out[i] = pending_dir
+                anchor_out[i] = pending_anchor
+                # Reset — prevent same anchor firing twice
+                pending_end = -1
+                pending_dir = 0
+                pending_anchor = -1
+
+        i += 1
+
+    return out, anchor_out
+
+
 def detect_signal(
     signals_df: pd.DataFrame,
     anchor: str,
@@ -360,7 +413,12 @@ def detect_signal(
     """
     anchor_arr, complement_arr = build_signal_arrays(signals_df, anchor, complement)
     if complement_arr is None:
-        raw, anc = run_ring_buffer(anchor_arr, None, connector, window)
+        if continuation is not None and continuation in signals_df.columns:
+            # 1R+1C: anchor fires, continuation must follow within WINDOW_ORDERED bars
+            cont_arr = signals_df[continuation].to_numpy(dtype=np.int8, copy=True)
+            raw, anc = run_ring_buffer_type1c(anchor_arr, cont_arr, window_tail=WINDOW_ORDERED)
+        else:
+            raw, anc = run_ring_buffer(anchor_arr, None, connector, window)
     else:
         first_pat, _second_pat = get_pass_order(anchor, complement)
         if first_pat == anchor:
