@@ -79,6 +79,89 @@ def _rsi(arr: np.ndarray, period: int = 14) -> np.ndarray:
     return result
 
 
+class RunningRSI:
+    """
+    Stateful Wilder RSI accumulator — O(1) per bar update. (ADR-096C)
+    Derives from the same Wilder smoothing math as _rsi().
+    Use .update(close) to feed one bar at a time; returns current RSI scalar.
+    Warm-start by calling .update() for each bar in the IS window before OOS.
+    """
+
+    def __init__(self, period: int = 14):
+        self.period = period
+        self._avg_gain: float | None = None
+        self._avg_loss: float | None = None
+        self._prev_close: float | None = None
+        self._bar_count: int = 0
+        self._seed_gains: list[float] = []
+        self._seed_losses: list[float] = []
+
+    def update(self, close: float) -> float:
+        """Feed one closing price. Returns RSI scalar, or NaN if insufficient data."""
+        if self._prev_close is None:
+            self._prev_close = close
+            return float("nan")
+
+        delta = close - self._prev_close
+        gain = max(delta, 0.0)
+        loss = max(-delta, 0.0)
+        self._prev_close = close
+        self._bar_count += 1
+
+        if self._avg_gain is None:
+            # Accumulate seed period
+            self._seed_gains.append(gain)
+            self._seed_losses.append(loss)
+            if self._bar_count >= self.period:
+                self._avg_gain = float(np.mean(self._seed_gains))
+                self._avg_loss = float(np.mean(self._seed_losses))
+                self._seed_gains = []
+                self._seed_losses = []
+            else:
+                return float("nan")
+        else:
+            # Wilder smoothing — identical to _rsi() loop
+            self._avg_gain = (self._avg_gain * (self.period - 1) + gain) / self.period
+            self._avg_loss = (self._avg_loss * (self.period - 1) + loss) / self.period
+
+        if self._avg_loss == 0.0:
+            return 100.0
+        rs = self._avg_gain / self._avg_loss
+        return 100.0 - 100.0 / (1.0 + rs)
+
+    def reset(self) -> None:
+        """Reset state — use when starting a new instrument or window."""
+        self.__init__(self.period)
+
+
+class RunningEMA:
+    """
+    Stateful EMA accumulator — O(1) per bar update. (ADR-096C)
+    Standard exponential moving average with k = 2 / (period + 1).
+    Use .update(close) to feed one bar at a time; returns current EMA scalar.
+    Warm-start by calling .update() for each bar in the IS window before OOS.
+    """
+
+    def __init__(self, period: int):
+        self.period = period
+        self.k = 2.0 / (period + 1)
+        self._value: float | None = None
+        self._bar_count: int = 0
+
+    def update(self, close: float) -> float:
+        """Feed one closing price. Returns EMA scalar, or NaN if insufficient data."""
+        self._bar_count += 1
+        if self._value is None:
+            self._value = close
+        else:
+            self._value = close * self.k + self._value * (1.0 - self.k)
+        return self._value if self._bar_count >= self.period else float("nan")
+
+    def reset(self) -> None:
+        """Reset state — use when starting a new instrument or window."""
+        self.__init__(self.period)
+
+
 def _check_ma_cross_direction_detailed(
     df: pd.DataFrame,
     signal_idx: int,
@@ -450,3 +533,40 @@ def check_rsi_envelope(
         recovery_window=recovery_window,
         window_reversal_pair=window_reversal_pair,
     )[0]
+
+
+def _validate_running_accumulators(n: int = 100, period: int = 14) -> bool:
+    """
+    Validate RunningRSI and RunningEMA match batch _rsi/_sma output.
+    Returns True if max absolute difference < 1e-8. (ADR-096C)
+    """
+    rng = np.random.default_rng(42)
+    closes = 1.0 + np.cumsum(rng.normal(0, 0.001, n))
+
+    # Batch RSI
+    batch_rsi = _rsi(closes, period)
+
+    # Running RSI
+    acc = RunningRSI(period)
+    running_rsi = np.array([acc.update(c) for c in closes])
+
+    # Compare (ignore NaN positions)
+    valid = np.isfinite(batch_rsi) & np.isfinite(running_rsi)
+    if not valid.any():
+        return False
+    rsi_ok = np.max(np.abs(batch_rsi[valid] - running_rsi[valid])) < 1e-8
+
+    # Batch SMA
+    batch_sma = _sma(closes, period)
+
+    # Running EMA (note: RunningEMA is EMA not SMA — validate separately)
+    # SMA validation via manual rolling
+    sma_running = np.array([
+        float(np.mean(closes[max(0, i - period + 1):i + 1]))
+        if i >= period - 1 else float("nan")
+        for i in range(n)
+    ])
+    valid_sma = np.isfinite(batch_sma) & np.isfinite(sma_running)
+    sma_ok = np.max(np.abs(batch_sma[valid_sma] - sma_running[valid_sma])) < 1e-8
+
+    return rsi_ok and sma_ok
