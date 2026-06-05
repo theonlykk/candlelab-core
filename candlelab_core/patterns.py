@@ -40,18 +40,34 @@ def hammer_hanging_man(df: pd.DataFrame) -> pd.Series:
     """
     Long lower shadow (≥2× body), small upper shadow, small body.
     Hammer = bullish (after downtrend), Hanging Man = bearish (after uptrend).
+    ADR-098: strengthened trend detection — 5-bar net move + majority direction.
+    Shifted by 1 to evaluate trend preceding the pin bar, not including it.
     """
     b  = _body(df)
     lo = _lower(df)
     up = _upper(df)
     r  = _range(df)
-
     is_pattern = (r > 0) & (lo >= 2 * b) & (up <= 0.3 * r) & (b > 0)
-    prior_trend = df["close"].diff(3)
+
+    # ADR-098: 5-bar net trend ending at bar before hammer (close[t-1] - close[t-6])
+    prior_trend = df["close"].shift(1).diff(5)
+
+    # Majority consecutive closes: count declining/rising bars t-1 through t-5
+    close_changes = df["close"].diff(1)
+    declining = (close_changes.shift(1) < 0).astype(int) + \
+                (close_changes.shift(2) < 0).astype(int) + \
+                (close_changes.shift(3) < 0).astype(int) + \
+                (close_changes.shift(4) < 0).astype(int) + \
+                (close_changes.shift(5) < 0).astype(int)
+    rising    = (close_changes.shift(1) > 0).astype(int) + \
+                (close_changes.shift(2) > 0).astype(int) + \
+                (close_changes.shift(3) > 0).astype(int) + \
+                (close_changes.shift(4) > 0).astype(int) + \
+                (close_changes.shift(5) > 0).astype(int)
 
     sig = pd.Series(0, index=df.index)
-    sig[is_pattern & (prior_trend < 0)] =  1  # hammer
-    sig[is_pattern & (prior_trend > 0)] = -1  # hanging man
+    sig[is_pattern & (prior_trend < 0) & (declining >= 3)] =  1  # hammer
+    sig[is_pattern & (prior_trend > 0) & (rising >= 3)]    = -1  # hanging man
     return sig
 
 
@@ -60,18 +76,34 @@ def shooting_star_inverted_hammer(df: pd.DataFrame) -> pd.Series:
     """
     Long upper shadow (≥2× body), small lower shadow.
     Shooting Star = bearish (after uptrend), Inv. Hammer = bullish (after downtrend).
+    ADR-098: strengthened trend detection — 5-bar net move + majority direction.
+    Shifted by 1 to evaluate trend preceding the pin bar, not including it.
     """
     b  = _body(df)
     lo = _lower(df)
     up = _upper(df)
     r  = _range(df)
-
     is_pattern = (r > 0) & (up >= 2 * b) & (lo <= 0.3 * r) & (b > 0)
-    prior_trend = df["close"].diff(3)
+
+    # ADR-098: 5-bar net trend ending at bar before pin bar (close[t-1] - close[t-6])
+    prior_trend = df["close"].shift(1).diff(5)
+
+    # Majority consecutive closes: count declining/rising bars t-1 through t-5
+    close_changes = df["close"].diff(1)
+    declining = (close_changes.shift(1) < 0).astype(int) + \
+                (close_changes.shift(2) < 0).astype(int) + \
+                (close_changes.shift(3) < 0).astype(int) + \
+                (close_changes.shift(4) < 0).astype(int) + \
+                (close_changes.shift(5) < 0).astype(int)
+    rising    = (close_changes.shift(1) > 0).astype(int) + \
+                (close_changes.shift(2) > 0).astype(int) + \
+                (close_changes.shift(3) > 0).astype(int) + \
+                (close_changes.shift(4) > 0).astype(int) + \
+                (close_changes.shift(5) > 0).astype(int)
 
     sig = pd.Series(0, index=df.index)
-    sig[is_pattern & (prior_trend > 0)] = -1  # shooting star
-    sig[is_pattern & (prior_trend < 0)] =  1  # inverted hammer
+    sig[is_pattern & (prior_trend > 0) & (rising >= 3)]    = -1  # shooting star
+    sig[is_pattern & (prior_trend < 0) & (declining >= 3)] =  1  # inverted hammer
     return sig
 
 
@@ -82,9 +114,25 @@ def engulfing(df: pd.DataFrame) -> pd.Series:
     po   = o.shift(1)
     pc   = c.shift(1)
 
-    bull = _bear(df.shift(1)) & _bull(df) & (c > po) & (o < pc)
-    bear = _bull(df.shift(1)) & _bear(df) & (c < po) & (o > pc)
+    # ADR-098: prior trend requirement — 5-bar net directional move
+    # Shifted by 1 to exclude the engulfing candle from the trend measurement
+    # prior_trend = close[t-1] - close[t-6]: trend ending at prior candle's close
+    prior_trend = df["close"].shift(1).diff(5)
 
+    bull = (
+        _bear(df.shift(1)) &
+        _bull(df) &
+        (c > po) &
+        (o < pc) &
+        (prior_trend < 0)   # prior downtrend required for bullish reversal
+    )
+    bear = (
+        _bull(df.shift(1)) &
+        _bear(df) &
+        (c < po) &
+        (o > pc) &
+        (prior_trend > 0)   # prior uptrend required for bearish reversal
+    )
     sig[bull] =  1
     sig[bear] = -1
     return sig
@@ -102,18 +150,38 @@ def morning_evening_star(df: pd.DataFrame) -> pd.Series:
 
     star = b1 < 0.3 * b2   # middle candle has small body
 
-    # Morning star: candle-2 bearish, candle-1 gaps lower, candle-0 bullish & closes into candle-2 body
+    # FX Body Gap — institutional standard for continuous markets (ADR-098)
+    # Star body bounds (bar -1)
+    star_body_high = df[["open", "close"]].shift(1).max(axis=1)
+    star_body_low  = df[["open", "close"]].shift(1).min(axis=1)
+
+    # Morning star FX body gap:
+    # Star entire body below prior bearish close (exhaustion gap down)
+    # Current bar opens above star body (gap up confirmation)
+    gap_down_into_star = star_body_high <= df["close"].shift(2)
+    gap_up_from_star   = df["open"] > star_body_high
+
     morning = (
         star &
         _bear(df.shift(2)) &
         _bull(df) &
+        gap_down_into_star &
+        gap_up_from_star &
         (c > (df["open"].shift(2) + df["close"].shift(2)) / 2)
     )
-    # Evening star: candle-2 bullish, candle-0 bearish & closes into candle-2 body
+
+    # Evening star FX body gap:
+    # Star entire body above prior bullish close (exhaustion gap up)
+    # Current bar opens below star body (gap down confirmation)
+    gap_up_into_star   = star_body_low >= df["close"].shift(2)
+    gap_down_from_star = df["open"] < star_body_low
+
     evening = (
         star &
         _bull(df.shift(2)) &
         _bear(df) &
+        gap_up_into_star &
+        gap_down_from_star &
         (c < (df["open"].shift(2) + df["close"].shift(2)) / 2)
     )
 
